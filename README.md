@@ -1,0 +1,1 @@
+# Housing-Price-Prediction-on-the-Individual-Sale-of-Home-Prices-in-Ames-Iowa-from-January-2006-to-Ju
