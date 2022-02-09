@@ -1,0 +1,682 @@
+---
+title: "DS project"
+author: "Kalide Endale"
+date: "12/4/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(DescTools)
+library(modelr)
+library(tidyr)
+library(tidyverse)
+library(dplyr)
+library(randomForest)
+```
+
+## R Markdown
+```{r}
+dir01 <- "/Users/Kalide/Documents/Northeastern"
+dir02 <-"Introduction to Data Management and Processing/Ames.csv"
+path01 <- file.path(dir01,dir02)
+data1 <- read_csv(path01)
+```
+
+Preliminary results
+```{r}
+data1 <-subset(data1,select=-c(Order,PID))
+
+group_mean <- aggregate(SalePrice ~ Yr.Sold, data = data1, mean)
+
+graph1<-ggplot(group_mean,aes(x=Yr.Sold,y=SalePrice))+
+  geom_point()+geom_smooth();graph1
+
+ols<-lm(SalePrice ~ Year.Built,data1)
+
+
+summary(ols)
+
+correlation<-cor(data1$SalePrice,data1[, unlist(lapply(data1, is.numeric))])
+```
+
+
+Alley: NA = no alley acess
+Pool : NA = no pool
+Misc feature: NA = no additional features
+Fence: NA = no fence
+Fireplace quality: no fireplace
+Lot frontage (Linear feet of street connected to property
+) = has missing data, but most likely won't use. not an imp. indicator
+```{r}
+#count number of NA's in file and visualize NAs
+missing.values <- data1 %>%
+  gather(key = "key", value = "val") %>%
+  mutate(is.missing = is.na(val)) %>%
+  group_by(key, is.missing) %>%
+  dplyr::summarise(num.missing = n()) %>%
+  filter(is.missing == T) %>%
+  select(-is.missing) %>%
+  arrange(desc(num.missing))
+
+
+#plot the chart of NAs
+missing.values %>%
+  ggplot() +
+  geom_bar(aes(x=reorder(key, +num.missing), y=num.missing, fill = key), 
+           stat = 'identity') + 
+  coord_flip() +
+  labs(x='variable', 
+       y="number of missing values", 
+       title='Visual of Missing Values') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + theme_minimal()
+```
+
+
+```{r}
+attach(data1)
+#remove variables we don't need and remove NAs
+data2 <- subset(data1,
+                select = -c(Pool.QC,Misc.Feature,Alley,Fence,
+                            Fireplace.Qu,Lot.Frontage,Garage.Yr.Blt,Garage.Qual,
+                            Garage.Finish,Garage.Cond,Bsmt.Exposure,BsmtFin.Type.1,
+                            BsmtFin.Type.2))
+
+data2 <- na.omit(data2)
+```
+
+
+
+```{r}
+#turn central air into a dummy variable
+data2$Central.Air <- ifelse(data2$Central.Air == "Y", 1,0)
+data2$Street <- ifelse(data2$Street == "Pave",1,0)
+```
+
+Street - turn into dummy (1 for pavement)
+Remove:
+Lot shape? Possible remove
+Lot config? possible remove
+Land contour and lot slope are similar ? possibly remove one
+Condition 1 and Condition 2 (proximity to various conditions) Both columns have mostly normal proximity. Possibly remove both
+Building Type and House Style are similar. Remove House style
+Overall condition:remove, since most of our ind. variables are describing condition of home
+Roof style and Roof matl are similar. Remove Roof style because material is better indicator of cost and quality
+Mas vnr type and Mas vnr Area can both be removed. We have exterior quality on house as an indicator
+Exterior 1st and Exterior 2nd: remove both since we have exterior quality on house as an indicator
+BasmtFin SF 1 (Type 1 finished square feet) and BsmtFin Type 2(Rating of basement finished area): remove since square footage of entire home is included 
+X1st.Flr.SF and X2nd.Flr.SF: removing both square feet of these variables because we already have living area as an indicator variable
+Low quality finished square feet: remove
+bedroom.above grd, kitchen above grade will be removed. We will keep total rooms above grade as an indicator
+Garage cars and Garage Area: are very similar. We will remove garage area.
+3-san porch and Screen porch will be removed. We have open porch sf and enclosed porch sf as indicator variables for proch size
+Misc.val (value of miscellaneous feature) - remove. not important
+
+```{r}
+data2 <- subset(data2,
+                select = -c(Lot.Shape,Lot.Config,Land.Contour,
+                            Condition.1,Condition.2,House.Style,
+                            Overall.Cond,Roof.Style,Mas.Vnr.Area,
+                            Mas.Vnr.Type,Exterior.1st,Exterior.2nd,
+                            BsmtFin.SF.1,BsmtFin.SF.2,X1st.Flr.SF,
+                            X2nd.Flr.SF,Low.Qual.Fin.SF,Bedroom.AbvGr,
+                            Kitchen.AbvGr,Garage.Area,X3Ssn.Porch,
+                            Screen.Porch,Misc.Val,Utilities))
+data2$Neighborhood <- factor(data2$Neighborhood)
+```
+
+
+#additoinal removal of variables that are not a significant predictor of sales price
+
+#we will remove variables that have no signifcance with SalePrice. 
+
+Anova on variables to see statistacal signficance
+#adjusted our p-values using a bonferroni correction with an alpha cutoff of 0.05;
+conservative adjustment
+strongly safeguard against making any type 1 errors at cost of lower power
+reduced our our candidate variables from 45 to 27
+
+```{r}
+lm01 <- lm(log10(SalePrice) ~ Overall.Qual, data = data2)
+
+summary(lm01)
+
+#looks like there is one very large residual in the first box plot
+data2 %>%
+  add_residuals(lm01, "resid") %>%
+  ggplot(aes(x=Overall.Qual, group = Overall.Qual)) +
+  geom_boxplot(aes(y=resid)) +
+  labs(x="Overall Quality", 
+       y="Residuals",
+       title = "Residuals vs. Overall Quality") +
+  theme_minimal()
+#qq plot: cleary shows the we have an outlier
+data2 %>%
+  add_residuals(lm01, "resid") %>%
+  ggplot(aes(sample=resid)) +
+  geom_qq() +
+  theme_minimal() +
+  labs(x = "Theoretical Quantiles", 
+       y = "Sample Quantilies", 
+       title = "QQ Plot: Standardized residuals" )
+
+
+#The results are the same when we plot this in a histogram. The histogram looks like a normal distribution and one outlier in the beginning of the graph.
+data2 %>%
+  add_residuals(lm01, "resid") %>%
+  ggplot(aes(x=resid)) +
+  geom_histogram(bins=100) +
+  labs(x="Residuals",
+       title = "Distribution of residuals") +
+  theme_minimal()
+```
+
+```{r}
+#store the residuals of the linear regression as a new column in data2
+data2$resid <- resid(lm01)
+#Find out what 3 standard deviation is for the distribution and save it
+SD3 <- 3*sd(resid(lm01))
+#Make a dummy variable column to find out which data points exceed 3 s.d.
+data2$exceeds_3sd <- ifelse(abs(data2$resid) > SD3, 1, 0)
+
+#filter the outlier from dataframe2
+data2 <- data2 %>%
+  filter(data2$exceeds_3sd == 0)
+```
+
+
+```{r}
+# remove 1 Neighborhood because it only has one data. Will not allow us to properly partition data
+data2 <- data2 %>%
+  filter(Neighborhood!='Landmrk')
+
+data2 <- select(data2, -c(resid,exceeds_3sd))
+
+data2
+```
+
+
+
+```{r}
+set.seed(4)
+data_part <- resample_partition(data2,
+                            p=c(train=0.5,
+                                valid=0.25,
+                                test=0.25))
+data2 <- as.data.frame(data_part$train)
+dataValid <- as.data.frame(data_part$valid)
+dataTest <- as.data.frame(data_part$test)
+data_part
+data2
+```
+
+```{r}
+#remove insignifcant variables
+ANOVAsummary <- aov(SalePrice ~., data = data2)
+
+summary(ANOVAsummary)
+```
+
+```{r}
+library(broom)
+
+data3 <- ANOVAsummary %>%
+  tidy() %>%
+  mutate(adj.p.value = p.adjust(p.value,
+                                method = "bonferroni")) %>%
+  filter(adj.p.value < 0.05)
+data3
+```
+
+#reduced model after ANOVA test using bonferroni
+```{r}
+data4 <- data2[,which((names(data2) %in% data3$term)== TRUE)]
+data4 <- data.frame(data4, data2$SalePrice) %>%
+  rename(SalePrice = data2.SalePrice)
+data4
+```
+
+Correlation for numeric values
+```{r}
+data4.cor <- data4 %>% 
+select_if(is.numeric)
+```
+
+correlation<-cor(df03.cor$log10gdp_percapita,df03.cor[, unlist(lapply(df03.cor, is.numeric))])
+t(correlation)
+
+#corrletation matrix
+```{r fig.width=10, fig.height=10}
+data4.cor <- subset(data4.cor)
+ggcorrplot::ggcorrplot(cor(data4.cor), tl.cex = 12) 
+numeric_cor <- cor(data4.cor$SalePrice,data4.cor[, unlist(lapply(data4.cor,is.numeric))])
+t(numeric_cor)
+
+numeric_cor <- as.tibble(t(numeric_cor))
+numeric_cor
+num_corr <- data.frame(colnames(data4.cor[, unlist(lapply(data4.cor,is.numeric))]),numeric_cor)
+num_corr
+```
+
+```{r}
+data4.cor_catg <- data4 %>% 
+select_if(Negate(is.numeric))
+```
+
+
+
+```{r}
+corr_cat <- c()
+for(i in colnames(data4.cor_catg)){
+corr <- UncertCoef(data4.cor_catg[[i]], data2$SalePrice, direction = "column")
+corr_cat=c(corr_cat,corr)
+
+}
+
+correlation_categorical <- data.frame(colnames(data4.cor_catg), corr_cat)
+correlation_categorical[order(-corr_cat),]
+```
+
+
+```{r}
+colnames(num_corr) <- c('Features','Correlation')
+colnames(correlation_categorical) <- c('Features','Correlation')
+
+#final correlation plot
+data_final_corr <- rbind(num_corr, correlation_categorical) %>%
+  mutate(abs_correlation = abs(Correlation)) %>%
+  arrange(desc(abs_correlation))
+data_final_corr
+
+```
+
+
+
+Variables we will choose from that have the best correlation with SalePrice
+Overall quality
+Gr.Liv.Area
+GarageCars
+Total.Bsmt.Sf
+Year.Built
+Year.Remod.Add
+Neighborhood (the only categorical variable that had a decent correlation with saleprice)
+Lot Area
+
+```{r}
+dataFinal <- select(data4, Overall.Qual, Gr.Liv.Area, Garage.Cars,
+                    Total.Bsmt.SF, Year.Built, Year.Remod.Add,
+                    Neighborhood, Lot.Area, SalePrice)
+
+dataFinalValid <- select(dataValid, Overall.Qual, Gr.Liv.Area, 
+                         Garage.Cars, Total.Bsmt.SF, Year.Built,
+                         Year.Remod.Add, Neighborhood, Lot.Area, SalePrice)
+
+dataFinalTest <- select(dataTest, Overall.Qual, Gr.Liv.Area, 
+                         Garage.Cars, Total.Bsmt.SF, Year.Built,
+                        Year.Remod.Add, Neighborhood, Lot.Area, SalePrice)
+dataFinal
+dataFinalValid
+dataFinalTest
+```
+
+
+```{r}
+rf <- randomForest(log10(SalePrice)~., data=dataFinal, proximity=TRUE)
+rf1 <- randomForest(log10(SalePrice) ~., data = data2, proximity = TRUE)
+```
+
+```{r}
+print(rf)
+plot(rf)
+rmse(rf, dataFinalValid)
+mae(rf, dataFinalValid)
+
+dataFinalValid %>%
+  add_residuals(rf, "resid") %>%
+  ggplot(aes(sample=resid)) +
+  geom_qq() +
+  theme_minimal()
+
+#RF against 43 varialbes instead of 9
+print(rf1)
+plot(rf1)
+rmse(rf1, dataValid)
+mae(rf1, dataValid)
+
+dataValid %>%
+  add_residuals(rf1, "resid") %>%
+  ggplot(aes(sample=resid)) +
+  geom_qq() +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data = data1, aes(Yr.Sold, fill = Neighborhood)) +
+  geom_bar(show.legend = FALSE) + facet_wrap(~Neighborhood) + 
+  theme(axis.text.x = element_text(color = "black", 
+                                   size = 7, angle=45,
+                                   vjust=.8, hjust=0.8))
+```
+
+ggplot(data = data1) + 
+         geom_bar(aes(Yr.Sold, fill = Yr.Sold)) + coord_flip() + scale_fill_viridis(discrete = TRUE, option = "A") + theme_minimal()
+
+```{r}
+data1 %>%
+ggplot(aes(x=SalePrice, group = Yr.Sold, fill = Yr.Sold)) +
+geom_histogram(bindwith = 10) + 
+theme(axis.text.x = element_text(color = "black", 
+                                 size = 6, angle=30,
+                                 vjust=.8, hjust=0.8)) + 
+scale_fill_viridis(discrete = FALSE, option = "H") + theme_minimal()
+```
+
+
+```{r}
+ggplot(dataFinal, aes(x=Overall.Qual, y=log10(SalePrice), 
+                      group = Overall.Qual, fill = Overall.Qual)) +
+  geom_boxplot() +
+  scale_fill_viridis(discrete = FALSE) +
+  theme_minimal()
+```
+
+```{r}
+ggplot(dataFinal, aes(x=Gr.Liv.Area, y=log10(SalePrice))) +
+  geom_point() +
+  geom_smooth(fill="light blue") +
+  geom_smooth(method="lm", color="red", fill="pink") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(dataFinal, aes(x=Garage.Cars, y=log10(SalePrice), group = Garage.Cars)) +
+  geom_boxplot(aes(fill = Garage.Cars)) +
+  scale_fill_viridis(discrete = FALSE, option = "G")+
+  theme_minimal()
+```
+
+```{r}
+ggplot(dataFinal, aes(x=Total.Bsmt.SF, y=log2(SalePrice))) +
+  geom_point() +
+  geom_smooth(fill="light blue") +
+  geom_smooth(method="lm", color="red", fill="pink") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(dataFinal, aes(x=Year.Built, y=log2(SalePrice))) +
+  geom_point() +
+  geom_smooth(fill="light blue") +
+  geom_smooth(method="lm", color="red", fill="pink") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(dataFinal, aes(x=Year.Remod.Add, y=log10(SalePrice))) +
+  geom_point() +
+  geom_smooth(fill="light blue") +
+  geom_smooth(method="lm", color="red", fill="pink") +
+  theme_minimal()
+```
+scale_colour_viridis_d(option = "plasma")
+fill = Overall.Qual)
+```{r}
+ggplot(dataFinal, aes(x=Gr.Liv.Area, y=mean(log10(SalePrice)), 
+                      group = Overall.Qual)) +
+  geom_boxplot(aes(fill = Overall.Qual)) +
+  scale_fill_viridis(discrete = FALSE, option = "H")  +
+  theme_minimal() +
+  labs(y = "Average log10(saleprice)")
+  theme(axis.text.x = element_text(color = "black", 
+                                   size = 9, angle=30,
+                                   vjust=.8, hjust=0.8))
+  
+```
+
+```{r}
+makeStep <- function(response, predictors, candidates)
+{
+  rhs <- paste0(paste0(predictors, collapse="+"), "+", candidates)
+  formulas <- lapply(paste0(response, "~", rhs), as.formula)
+  rmses <- sapply(formulas,
+                  function(fm) rmse(lm(fm, data=dataFinal),
+                                    data=dataFinalValid))
+  names(rmses) <- candidates
+  attr(rmses, "best") <- rmses[which.min(rmses)]
+  rmses
+}
+```
+
+#### Step 1 (no variables):
+
+```{r}
+model <- NULL
+
+preds <- ""
+cands <- c("Overall.Qual", 
+           "Gr.Liv.Area", 
+           "Garage.Cars", 
+           "Total.Bsmt.SF", 
+           "Year.Built",
+           "Year.Remod.Add",
+           "Neighborhood",
+           "Lot.Area")
+s1 <- makeStep("log10(SalePrice)", preds, cands)
+
+model <- c(model, attr(s1, "best"))
+s1
+```
+
+```{r}
+preds <- c("Overall.Qual")
+cands <- c("Gr.Liv.Area", 
+           "Garage.Cars", 
+           "Total.Bsmt.SF", 
+           "Year.Built",
+           "Year.Remod.Add",
+           "Neighborhood", "Lot.Area")
+s1 <- makeStep("log10(SalePrice)", preds, cands)
+
+model <- c(model, attr(s1, "best"))
+s1
+```
+
+```{r}
+preds <- c("Overall.Qual", "Gr.Liv.Area")
+cands <- c("Neighborhood", 
+           "Garage.Cars", 
+           "Total.Bsmt.SF", 
+           "Year.Built",
+           "Year.Remod.Add","Lot.Area")
+s1 <- makeStep("log10(SalePrice)", preds, cands)
+
+model <- c(model, attr(s1, "best"))
+s1
+```
+
+```{r}
+preds <- c("Gr.Liv.Area", "Overall.Qual", "Neighborhood")
+cands <- c("Garage.Cars", 
+           "Total.Bsmt.SF", 
+           "Year.Built",
+           "Year.Remod.Add","Lot.Area")
+s1 <- makeStep("log10(SalePrice)", preds, cands)
+
+model <- c(model, attr(s1, "best"))
+s1
+```
+
+```{r}
+preds <- c("Gr.Liv.Area", "Overall.Qual", "Neighborhood",
+           "Total.Bsmt.SF")
+cands <- c("Garage.Cars","Year.Built","Year.Remod.Add","Lot.Area")
+s1 <- makeStep("log10(SalePrice)", preds, cands)
+
+model <- c(model, attr(s1, "best"))
+s1
+```
+```{r}
+preds <- c("Gr.Liv.Area", "Overall.Qual", "Neighborhood",
+           "Total.Bsmt.SF","Year.Remod.Add")
+cands <- c("Garage.Cars","Year.Built","Lot.Area")
+s1 <- makeStep("log10(SalePrice)", preds, cands)
+
+model <- c(model, attr(s1, "best"))
+s1
+```
+
+```{r}
+preds <- c("Gr.Liv.Area", "Overall.Qual", "Neighborhood",
+           "Year.Built", "Garage.Cars","Year.Built")
+cands <- c("Garage.Cars","Lot.Area")
+s1 <- makeStep("log10(SalePrice)", preds, cands)
+
+model <- c(model, attr(s1, "best"))
+s1
+```
+
+
+```{r}
+step_model <- tibble(index=seq_along(model),
+                     variable=factor(names(model), levels=unique(names(model))),
+                     RMSE=model)
+
+ggplot(step_model, aes(y=RMSE)) +
+  geom_point(aes(x=variable)) +
+  geom_line(aes(x=index)) +
+  labs(title="Stepwise model selection") +
+  theme_classic() +
+  theme(axis.text.x = element_text(color = "black", 
+                                   size = 9, angle=30,
+                                   vjust=.8, hjust=0.8))
+```
+
+```{r}
+library(olsrr)
+modelStepwise <- lm(log10(SalePrice) ~ Overall.Qual + Gr.Liv.Area + Neighborhood + Total.Bsmt.SF + Year.Remod.Add + Year.Built, data=dataFinalValid)
+
+rmse(modelStepwise, dataFinalValid)
+
+dataFinalValid %>%
+  add_residuals(modelStepwise, "resid") %>%
+  ggplot(aes(sample=resid)) +
+  geom_qq() +
+  theme_minimal() +
+  coord_cartesian(ylim=c(-.3,.2))
+
+dataFinalValid %>%
+add_residuals(modelStepwise, "resid") %>%
+ggplot(aes(x=resid)) +
+geom_histogram(bins=50, color = "darkblue", fill = "lightblue") +
+theme_minimal()
+
+#residual test against variables
+
+
+dataFinalValid %>%
+add_residuals(modelStepwise, "resid") %>%
+ggplot(aes(x= Overall.Qual)) +
+geom_point(aes(y=resid))+
+labs(x="",
+     y="Residuals",
+     title = "Residuals vs. Overall Quality")
+theme_minimal()
+
+dataFinalValid %>%
+add_residuals(modelStepwise, "resid") %>%
+ggplot(aes(x= Gr.Liv.Area)) +
+geom_point(aes(y=resid))+
+labs(x="",
+     y="Residuals",
+     title = "Residuals vs. Above Ground Living Area Square Feet")
+theme_minimal()
+
+  
+dataFinalValid %>%
+add_residuals(modelStepwise, "resid") %>%
+ggplot(aes(x=Neighborhood)) +
+geom_point(aes(y=resid))+
+labs(x="",
+     y="Residuals",
+     title = "Residuals vs. Neighborhood")
+theme_minimal() +
+theme(axis.text.x = element_text(color = "black", 
+                                 size = 5, angle=45,
+                                 vjust=.8, hjust=0.8))
+
+dataFinalValid %>%
+  add_residuals(modelStepwise, "resid") %>%
+  ggplot(aes(x= Total.Bsmt.SF)) +
+  geom_point(aes(y=resid))+
+  labs(x="Total Basment Square Feet",
+       y="Residuals",
+       title = "Residuals vs. Total Basment Square Feet")
+  theme_minimal()
+
+dataFinalValid %>%
+add_residuals(modelStepwise, "resid") %>%
+ggplot(aes(x= Year.Remod.Add)) +
+geom_point(aes(y=resid))+
+labs(x="Year Remodeled",
+     y="Residuals",
+     title = "Residuals vs. Year Remodeled")
+theme_minimal()  
+  
+  
+dataFinalValid %>%
+add_residuals(modelStepwise, "resid") %>%
+ggplot(aes(x= Year.Built)) +
+geom_point(aes(y=resid))+
+labs(x="Year Built",
+     y="Residuals",
+     title = "Residuals vs. Year Built")
+theme_minimal()
+
+```
+
+
+```{r}
+summary(modelStepwise)
+```
+
+
+```{r}
+dataFinal <- subset(dataFinal, select = -Neighborhood)
+dataFinal$SalePrice <- log10(dataFinal$SalePrice)
+
+dataFinal <- dataFinal %>%
+  rename(Year.Remod = Year.Remod.Add)
+```
+
+
+```{r fig.width=8, fig.height=7}
+
+
+library("GGally")
+lowerFn <- function(data, mapping, method = "lm",...) {
+p <- ggplot(data = data, mapping = mapping) +
+geom_point(colour = "blue") +
+geom_smooth(method = method, color = "red",...)
+p
+}
+
+ggpairs(dataFinal, lower = list(continuous = wrap(lowerFn, method = "lm")),
+diag = list(continuous = wrap("densityDiag", colour = "blue")),
+upper = list(continuous = wrap("cor", size = 4))) + 
+theme(axis.text.x = element_text(color = "black",
+                                 size = 8, angle=30, 
+                                 vjust=.8, hjust=0.8))
+```
+
+
+```{r}
+library(vip)
+vip(modelStepwise, aesthetics = list(fill = "purple")) + theme_classic()
+
+
+```
+
